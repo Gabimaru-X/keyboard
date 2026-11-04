@@ -8,7 +8,10 @@ enum class ToneStyle {
     CASUAL,
     CONCISE,
     EMOJIFY,
-    PROOFREAD
+    PROOFREAD,
+    PROFESSIONAL,
+    WITTY,
+    EMPATHETIC
 }
 
 enum class GnosisWritingIntent(val id: Int, val label: String) {
@@ -115,10 +118,10 @@ object GnosisAiCore {
     fun rewriteText(input: String, style: ToneStyle): String {
         if (input.isBlank()) return input
         return when (style) {
-            ToneStyle.FORMAL -> toFormal(input)
-            ToneStyle.CASUAL -> toCasual(input)
+            ToneStyle.FORMAL, ToneStyle.PROFESSIONAL -> toFormal(input)
+            ToneStyle.CASUAL, ToneStyle.EMPATHETIC -> toCasual(input)
             ToneStyle.CONCISE -> toConcise(input)
-            ToneStyle.EMOJIFY -> toEmojified(input)
+            ToneStyle.EMOJIFY, ToneStyle.WITTY -> toEmojified(input)
             ToneStyle.PROOFREAD -> toProofread(input)
         }
     }

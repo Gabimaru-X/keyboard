@@ -160,6 +160,22 @@ class RevampedKeyboardResizer(
                 .apply()
         }
 
+        fun showResizer(
+            context: Context,
+            rootLayout: ViewGroup,
+            keyboardView: View,
+            onDismiss: () -> Unit
+        ) {
+            attachResizerOverlay(context, keyboardView, rootLayout, onDismiss)
+        }
+
+        fun dismissResizer(rootLayout: ViewGroup) {
+            val overlay = rootLayout.findViewWithTag<View>("resizer_overlay")
+            if (overlay != null) {
+                rootLayout.removeView(overlay)
+            }
+        }
+
         fun attachResizerOverlay(
             context: Context,
             targetView: View,
