@@ -236,13 +236,11 @@ class RevampedKeyboardService : InputMethodService() {
                         val imeOptions = editorInfo?.imeOptions ?: 0
                         val act = imeOptions and EditorInfo.IME_MASK_ACTION
 
-                        if (isFieldEmpty()) {
-                            // If field is empty, close keyboard
-                            requestHideSelf(0)
-                        } else if (act != EditorInfo.IME_ACTION_NONE && act != EditorInfo.IME_ACTION_UNSPECIFIED) {
+                        if (act != EditorInfo.IME_ACTION_NONE && act != EditorInfo.IME_ACTION_UNSPECIFIED) {
                             ic.performEditorAction(act)
                         } else {
-                            ic.commitText("\n", 1)
+                            ic.sendKeyEvent(android.view.KeyEvent(android.view.KeyEvent.ACTION_DOWN, android.view.KeyEvent.KEYCODE_ENTER))
+                            ic.sendKeyEvent(android.view.KeyEvent(android.view.KeyEvent.ACTION_UP, android.view.KeyEvent.KEYCODE_ENTER))
                         }
                     }
                     commitCurrentWord()

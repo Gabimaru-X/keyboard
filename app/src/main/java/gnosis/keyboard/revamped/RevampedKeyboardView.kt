@@ -115,7 +115,7 @@ class RevampedKeyboardView @JvmOverloads constructor(
         }
     }
 
-    fun updateActionKeyState(imeOptions: Int, isFieldEmpty: Boolean) {
+    fun updateActionKeyState(imeOptions: Int, isFieldEmpty: Boolean = false) {
         this.currentImeAction = imeOptions and EditorInfo.IME_MASK_ACTION
         this.isCurrentFieldEmpty = isFieldEmpty
         updateActionKeyVisual()
@@ -123,13 +123,12 @@ class RevampedKeyboardView @JvmOverloads constructor(
 
     private fun updateActionKeyVisual() {
         val iv = actionKeyImageView ?: return
-        val iconRes = when {
-            isCurrentFieldEmpty -> R.drawable.ic_chevron_down
-            currentImeAction == EditorInfo.IME_ACTION_SEARCH -> R.drawable.ic_search
-            currentImeAction == EditorInfo.IME_ACTION_SEND -> R.drawable.ic_send
-            currentImeAction == EditorInfo.IME_ACTION_GO -> R.drawable.ic_corner_down_left
-            currentImeAction == EditorInfo.IME_ACTION_DONE -> R.drawable.ic_check
-            currentImeAction == EditorInfo.IME_ACTION_NEXT -> R.drawable.ic_corner_down_left
+        val iconRes = when (currentImeAction) {
+            EditorInfo.IME_ACTION_SEARCH -> R.drawable.ic_search
+            EditorInfo.IME_ACTION_SEND -> R.drawable.ic_send
+            EditorInfo.IME_ACTION_GO -> R.drawable.ic_corner_down_left
+            EditorInfo.IME_ACTION_DONE -> R.drawable.ic_check
+            EditorInfo.IME_ACTION_NEXT -> R.drawable.ic_corner_down_left
             else -> R.drawable.ic_corner_down_left
         }
         iv.setImageResource(iconRes)
