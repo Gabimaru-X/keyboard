@@ -2,6 +2,7 @@ package gnosis.keyboard.revamped
 
 import android.content.Context
 import android.content.Intent
+import android.content.SharedPreferences
 import android.graphics.Color
 import android.graphics.drawable.GradientDrawable
 import android.inputmethodservice.InputMethodService
@@ -29,12 +30,12 @@ import gnosis.keyboard.revamped.engine.ai.ToneStyle
  *
  * Core InputMethodService implementation orchestrating:
  * 1. 15 Native shared object binaries (Delight5, TNT, Mozc, ScaNN, SODA Speech)
- * 2. Revamped skin keyboard UI (Omnitype toolbar, indented QWERTY, smooth spacebar scrubbing)
+ * 2. Revamped skin keyboard UI (Omnitype toolbar, indented QWERTY, full modern bottom row)
  * 3. On-device Gnosis AI Core (5 tone styles, 9-class intent classification, safety filter)
  * 4. 5-profile Audio & Haptic engine with discrete character scrub ticks
  * 5. Google Keyboard-style 8-handle dynamic resizer overlay
  * 6. Categorized emoji picker panel & concept predictor
- * 7. Quick key snippets & continuous spatial touch calibration
+ * 7. Category-wise preferences synchronization
  */
 class RevampedKeyboardService : InputMethodService() {
 
@@ -44,6 +45,7 @@ class RevampedKeyboardService : InputMethodService() {
     private lateinit var dynamicLm: RevampedDynamicLm
     private lateinit var sentenceExplorer: RevampedSentenceExplorer
     private lateinit var spatialModel: RevampedSpatialTouchModel
+    private lateinit var prefs: SharedPreferences
 
     private var emojiPanel: View? = null
     private var aiToneStrip: View? = null
@@ -52,8 +54,15 @@ class RevampedKeyboardService : InputMethodService() {
     private var isShifted = false
     private var isResizerActive = false
 
+    // Config flags
+    private var predictionsEnabled = true
+    private var autocorrectEnabled = false
+    private var grammarEnabled = true
+    private var hinglishEnabled = true
+
     override fun onCreate() {
         super.onCreate()
+        prefs = getSharedPreferences("revamped_prefs", Context.MODE_PRIVATE)
 
         // 1. Initialize native C++ shared objects
         RevampedDelightBridge.loadAllNativeModules()
@@ -88,6 +97,7 @@ class RevampedKeyboardService : InputMethodService() {
         }
 
         setupKeyboardCallbacks()
+        loadPreferences()
         rootContainer.addView(keyboardView)
 
         return rootContainer
@@ -95,17 +105,52 @@ class RevampedKeyboardService : InputMethodService() {
 
     override fun onStartInputView(info: EditorInfo?, restarting: Boolean) {
         super.onStartInputView(info, restarting)
+        loadPreferences()
         currentComposingText.clear()
         previousWord = ""
         isShifted = false
         updateCandidates(emptyList())
         hideSubPanels()
+
+        keyboardView.updateActionKeyState(info?.imeOptions ?: 0, isFieldEmpty())
+    }
+
+    private fun loadPreferences() {
+        predictionsEnabled = prefs.getBoolean("pref_predictions_enabled", true)
+        autocorrectEnabled = prefs.getBoolean("pref_autocorrect_enabled", false)
+        grammarEnabled = prefs.getBoolean("pref_grammar_enabled", true)
+        hinglishEnabled = prefs.getBoolean("pref_hinglish_enabled", true)
+
+        audioHaptics.isSoundEnabled = prefs.getBoolean("pref_audio_enabled", true)
+        val profileIdx = prefs.getInt("pref_sound_profile", 0)
+        audioHaptics.currentSoundProfile = when (profileIdx) {
+            1 -> RevampedAudioHapticEngine.SoundProfile.MECHANICAL
+            2 -> RevampedAudioHapticEngine.SoundProfile.SOFT_BUBBLE
+            3 -> RevampedAudioHapticEngine.SoundProfile.TYPEWRITER
+            4 -> RevampedAudioHapticEngine.SoundProfile.PIANO
+            else -> RevampedAudioHapticEngine.SoundProfile.MODERN_CLICK
+        }
+        audioHaptics.soundVolume = prefs.getFloat("pref_sound_volume", 0.8f)
+
+        audioHaptics.isHapticEnabled = prefs.getBoolean("pref_haptic_enabled", true)
+        audioHaptics.hapticDurationMs = prefs.getInt("pref_haptic_intensity", 18).toLong()
+
+        keyboardView.applyPreferences(prefs)
+    }
+
+    private fun isFieldEmpty(): Boolean {
+        val ic = currentInputConnection ?: return true
+        val before = ic.getTextBeforeCursor(1, 0)
+        val after = ic.getTextAfterCursor(1, 0)
+        return (before == null || before.isEmpty()) && (after == null || after.isEmpty())
     }
 
     private fun setupKeyboardCallbacks() {
         // Spacebar smooth cursor scrubbing with discrete ticks
         keyboardView.onCursorMoveListener = { dir ->
-            audioHaptics.performDiscreteScrubHaptic()
+            if (prefs.getBoolean("pref_scrub_haptic_enabled", true)) {
+                audioHaptics.performDiscreteScrubHaptic()
+            }
             val ic = currentInputConnection
             if (ic != null) {
                 val textBefore = ic.getTextBeforeCursor(200, 0)?.toString() ?: ""
@@ -122,13 +167,47 @@ class RevampedKeyboardService : InputMethodService() {
                     audioHaptics.playTypingSound()
                     audioHaptics.performKeyHaptic()
                     spatialModel.recordTouch(100f, 100f, action.text.firstOrNull() ?: ' ')
-                    currentComposingText.append(action.text)
-                    currentInputConnection?.commitText(action.text, 1)
-                    evaluateCandidates()
+
+                    if (action.text == " ") {
+                        // Space pressed: check auto-correct
+                        if (autocorrectEnabled && currentComposingText.isNotEmpty()) {
+                            val word = currentComposingText.toString()
+                            val corrected = sentenceExplorer.correctWord(word)
+                            if (corrected != word) {
+                                val ic = currentInputConnection
+                                if (ic != null) {
+                                    ic.deleteSurroundingText(word.length, 0)
+                                    ic.commitText(corrected, 1)
+                                }
+                            }
+                        }
+                        commitCurrentWord()
+                        currentInputConnection?.commitText(" ", 1)
+                    } else {
+                        currentComposingText.append(action.text)
+                        currentInputConnection?.commitText(action.text, 1)
+                        if (predictionsEnabled) {
+                            evaluateCandidates()
+                        }
+                    }
+
                     if (isShifted) {
                         isShifted = false
                         keyboardView.setShiftState(false)
                     }
+
+                    keyboardView.updateActionKeyState(currentInputEditorInfo?.imeOptions ?: 0, isFieldEmpty())
+                }
+                is RevampedKeyboardView.KeyAction.DoubleSpacePeriod -> {
+                    audioHaptics.playTypingSound()
+                    audioHaptics.performKeyHaptic()
+                    val ic = currentInputConnection
+                    if (ic != null) {
+                        ic.deleteSurroundingText(1, 0)
+                        ic.commitText(". ", 1)
+                    }
+                    commitCurrentWord()
+                    keyboardView.updateActionKeyState(currentInputEditorInfo?.imeOptions ?: 0, isFieldEmpty())
                 }
                 is RevampedKeyboardView.KeyAction.Backspace -> {
                     audioHaptics.playTypingSound()
@@ -137,7 +216,10 @@ class RevampedKeyboardService : InputMethodService() {
                         currentComposingText.deleteCharAt(currentComposingText.length - 1)
                     }
                     currentInputConnection?.deleteSurroundingText(1, 0)
-                    evaluateCandidates()
+                    if (predictionsEnabled) {
+                        evaluateCandidates()
+                    }
+                    keyboardView.updateActionKeyState(currentInputEditorInfo?.imeOptions ?: 0, isFieldEmpty())
                 }
                 is RevampedKeyboardView.KeyAction.Shift -> {
                     audioHaptics.performKeyHaptic()
@@ -147,12 +229,17 @@ class RevampedKeyboardService : InputMethodService() {
                 is RevampedKeyboardView.KeyAction.Enter -> {
                     audioHaptics.playTypingSound()
                     audioHaptics.performKeyHaptic()
+
                     val ic = currentInputConnection
                     if (ic != null) {
                         val editorInfo = currentInputEditorInfo
                         val imeOptions = editorInfo?.imeOptions ?: 0
                         val act = imeOptions and EditorInfo.IME_MASK_ACTION
-                        if (act != EditorInfo.IME_ACTION_NONE && act != EditorInfo.IME_ACTION_UNSPECIFIED) {
+
+                        if (isFieldEmpty()) {
+                            // If field is empty, close keyboard
+                            requestHideSelf(0)
+                        } else if (act != EditorInfo.IME_ACTION_NONE && act != EditorInfo.IME_ACTION_UNSPECIFIED) {
                             ic.performEditorAction(act)
                         } else {
                             ic.commitText("\n", 1)
@@ -160,9 +247,14 @@ class RevampedKeyboardService : InputMethodService() {
                     }
                     commitCurrentWord()
                 }
+                is RevampedKeyboardView.KeyAction.LanguageSwitch -> {
+                    audioHaptics.performKeyHaptic()
+                    cycleLanguage()
+                }
                 is RevampedKeyboardView.KeyAction.Suggestion -> {
                     audioHaptics.performKeyHaptic()
                     commitSuggestion(action.word)
+                    keyboardView.updateActionKeyState(currentInputEditorInfo?.imeOptions ?: 0, isFieldEmpty())
                 }
                 is RevampedKeyboardView.KeyAction.ToolbarItem -> {
                     audioHaptics.performKeyHaptic()
@@ -171,7 +263,7 @@ class RevampedKeyboardService : InputMethodService() {
                         "ai_core" -> toggleAiToneStrip()
                         "emoji" -> toggleEmojiPanel()
                         "voice" -> triggerVoiceSpeech()
-                        "quick_keys" -> showQuickKeysSelector()
+                        "clipboard" -> showClipboardHistory()
                         "settings" -> launchSettingsActivity()
                     }
                 }
@@ -180,6 +272,27 @@ class RevampedKeyboardService : InputMethodService() {
                 }
             }
         }
+    }
+
+    private fun cycleLanguage() {
+        val currentLang = prefs.getString("pref_language", "en") ?: "en"
+        val nextLang = when (currentLang) {
+            "en" -> "hinglish"
+            "hinglish" -> "hi"
+            "hi" -> "es"
+            "es" -> "fr"
+            else -> "en"
+        }
+        prefs.edit().putString("pref_language", nextLang).apply()
+        val label = when (nextLang) {
+            "hinglish" -> "Hinglish"
+            "hi" -> "Hindi (Devanagari)"
+            "es" -> "Spanish"
+            "fr" -> "French"
+            else -> "English (US)"
+        }
+        Toast.makeText(this, "Language: $label", Toast.LENGTH_SHORT).show()
+        loadPreferences()
     }
 
     private fun evaluateCandidates() {
@@ -193,7 +306,7 @@ class RevampedKeyboardService : InputMethodService() {
         val dynCandidates = dynamicLm.predictNextWords(query)
 
         // 2. Query Sentence Explorer for syntax/homophones
-        val corrected = sentenceExplorer.correctWord(query)
+        val corrected = if (grammarEnabled) sentenceExplorer.correctWord(query) else query
 
         // 3. ScaNN / Expressive concepts
         val emojiConcepts = RevampedEmojiEngine.getEmojiSuggestions(query)
@@ -250,26 +363,20 @@ class RevampedKeyboardService : InputMethodService() {
     }
 
     // -------------------------------------------------------------
-    // Toolbar Feature Integrations
+    // Panels & Modals
     // -------------------------------------------------------------
-
     private fun toggleResizer() {
         if (isResizerActive) {
-            val overlay = rootContainer.findViewWithTag<View>("resizer_overlay")
-            if (overlay != null) {
-                rootContainer.removeView(overlay)
-            }
+            RevampedKeyboardResizer.dismissResizer(rootContainer)
             isResizerActive = false
         } else {
-            isResizerActive = true
-            RevampedKeyboardResizer.attachResizerOverlay(
+            RevampedKeyboardResizer.showResizer(
                 context = this,
-                targetView = keyboardView,
-                parentContainer = rootContainer,
-                onDismiss = {
-                    isResizerActive = false
-                }
+                rootLayout = rootContainer,
+                keyboardView = keyboardView,
+                onDismiss = { isResizerActive = false }
             )
+            isResizerActive = true
         }
     }
 
@@ -282,91 +389,68 @@ class RevampedKeyboardService : InputMethodService() {
 
         hideSubPanels()
 
-        val density = resources.displayMetrics.density
-        val dp = { v: Float -> (v * density).toInt() }
+        val dp8 = dp(8f)
+        val dp6 = dp(6f)
 
         val strip = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             setBackgroundColor(Color.parseColor("#15161C"))
-            setPadding(dp(8f), dp(6f), dp(8f), dp(6f))
+            setPadding(dp8, dp6, dp8, dp6)
             layoutParams = FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                dp(48f)
-            ).apply {
-                gravity = Gravity.TOP
-            }
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                dp(48f),
+                Gravity.TOP
+            )
         }
 
-        fun createTonePill(title: String, style: ToneStyle) {
-            val pill = TextView(this).apply {
-                text = title
+        val toneStyles = listOf(
+            "Casual" to ToneStyle.CASUAL,
+            "Professional" to ToneStyle.PROFESSIONAL,
+            "Witty" to ToneStyle.WITTY,
+            "Concise" to ToneStyle.CONCISE,
+            "Empathetic" to ToneStyle.EMPATHETIC
+        )
+
+        for ((name, style) in toneStyles) {
+            val btn = TextView(this).apply {
+                text = name
                 setTextColor(Color.WHITE)
                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-                setPadding(dp(12f), dp(6f), dp(12f), dp(6f))
+                setPadding(dp(10f), dp(6f), dp(10f), dp(6f))
                 background = GradientDrawable().apply {
-                    cornerRadius = dp(16f).toFloat()
-                    setColor(Color.parseColor("#262934"))
-                    setStroke(dp(1f), Color.parseColor("#38BDF8"))
-                }
-                layoutParams = LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.WRAP_CONTENT,
-                    ViewGroup.LayoutParams.WRAP_CONTENT
-                ).apply {
-                    marginEnd = dp(6f)
+                    cornerRadius = dp(14f).toFloat()
+                    setColor(Color.parseColor("#242630"))
                 }
                 setOnClickListener {
-                    applyAiToneRewrite(style)
+                    audioHaptics.performKeyHaptic()
+                    applyAiTone(style)
                 }
             }
-            strip.addView(pill)
+            strip.addView(btn)
+            strip.addView(View(this).apply { layoutParams = LinearLayout.LayoutParams(dp(6f), 1) })
         }
 
-        createTonePill("✨ Formal", ToneStyle.FORMAL)
-        createTonePill("💬 Casual", ToneStyle.CASUAL)
-        createTonePill("⚡ Concise", ToneStyle.CONCISE)
-        createTonePill("🎉 Emojify", ToneStyle.EMOJIFY)
-        createTonePill("🛡 Polish", ToneStyle.PROOFREAD)
-
-        val hScroll = HorizontalScrollView(this).apply {
-            layoutParams = FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                dp(48f)
-            ).apply {
-                gravity = Gravity.TOP
-            }
-            isFillViewport = true
-            isHorizontalScrollBarEnabled = false
-            addView(strip)
-        }
-
-        aiToneStrip = hScroll
-        rootContainer.addView(hScroll)
+        aiToneStrip = strip
+        rootContainer.addView(strip)
     }
 
-    private fun applyAiToneRewrite(style: ToneStyle) {
+    private fun applyAiTone(style: ToneStyle) {
         val ic = currentInputConnection ?: return
-        val selectedText = ic.getSelectedText(0)?.toString()
-        val textToTransform = if (!selectedText.isNullOrEmpty()) {
-            selectedText
-        } else {
-            ic.getTextBeforeCursor(200, 0)?.toString() ?: ""
-        }
+        val selected = ic.getSelectedText(0)?.toString() ?: ""
+        val textToProcess = if (selected.isNotEmpty()) selected else ic.getTextBeforeCursor(150, 0)?.toString() ?: ""
 
-        if (textToTransform.isBlank()) {
-            Toast.makeText(this, "Type or select text for Gnosis AI rewrite", Toast.LENGTH_SHORT).show()
-            return
-        }
-
-        val rewritten = GnosisAiCore.rewriteText(textToTransform, style)
-        if (rewritten != textToTransform) {
-            if (!selectedText.isNullOrEmpty()) {
+        if (textToProcess.isNotEmpty()) {
+            val rewritten = GnosisAiCore.rewriteText(textToProcess, style)
+            if (selected.isNotEmpty()) {
                 ic.commitText(rewritten, 1)
             } else {
-                ic.deleteSurroundingText(textToTransform.length, 0)
+                ic.deleteSurroundingText(textToProcess.length, 0)
                 ic.commitText(rewritten, 1)
             }
-            audioHaptics.performKeyHaptic()
+            Toast.makeText(this, "AI Rewritten: ${style.name}", Toast.LENGTH_SHORT).show()
+        } else {
+            Toast.makeText(this, "No text to rewrite", Toast.LENGTH_SHORT).show()
         }
         toggleAiToneStrip()
     }
@@ -375,45 +459,94 @@ class RevampedKeyboardService : InputMethodService() {
         if (emojiPanel != null) {
             rootContainer.removeView(emojiPanel)
             emojiPanel = null
-            keyboardView.visibility = View.VISIBLE
             return
         }
 
         hideSubPanels()
 
-        val panel = RevampedEmojiEngine.buildEmojiPanel(
-            context = this,
-            skin = keyboardView.currentSkin,
-            onEmojiSelected = { emoji ->
-                audioHaptics.playTypingSound()
-                audioHaptics.performKeyHaptic()
-                currentInputConnection?.commitText(emoji, 1)
-            },
-            onClose = {
-                toggleEmojiPanel()
+        val panel = FrameLayout(this).apply {
+            layoutParams = FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                dp(220f),
+                Gravity.BOTTOM
+            )
+            setBackgroundColor(keyboardView.currentSkin.background)
+        }
+
+        val hScroll = HorizontalScrollView(this).apply {
+            layoutParams = FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT
+            )
+        }
+
+        val emojisRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(dp(12f), dp(12f), dp(12f), dp(12f))
+        }
+
+        val popularEmojis = listOf("😀", "😂", "🥰", "🔥", "✨", "🎉", "👍", "❤️", "🚀", "💡", "😎", "🙌", "💯", "👏", "🙏", "🤩")
+        for (emo in popularEmojis) {
+            val tv = TextView(this).apply {
+                text = emo
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 28f)
+                setPadding(dp(8f), dp(8f), dp(8f), dp(8f))
+                setOnClickListener {
+                    audioHaptics.performKeyHaptic()
+                    currentInputConnection?.commitText(emo, 1)
+                }
             }
-        )
+            emojisRow.addView(tv)
+        }
+
+        hScroll.addView(emojisRow)
+        panel.addView(hScroll)
 
         emojiPanel = panel
-        keyboardView.visibility = View.GONE
         rootContainer.addView(panel)
     }
 
-    private fun triggerVoiceSpeech() {
-        audioHaptics.performKeyHaptic()
-        Toast.makeText(this, "SODA Speech Engine: Ready for on-device acoustic capture", Toast.LENGTH_SHORT).show()
+    private fun showClipboardHistory() {
+        val cm = getSystemService(Context.CLIPBOARD_SERVICE) as? android.content.ClipboardManager
+        val clip = cm?.primaryClip
+        if (clip != null && clip.itemCount > 0) {
+            val text = clip.getItemAt(0).text?.toString() ?: ""
+            if (text.isNotEmpty()) {
+                currentInputConnection?.commitText(text, 1)
+                Toast.makeText(this, "Pasted from clipboard", Toast.LENGTH_SHORT).show()
+            } else {
+                Toast.makeText(this, "Clipboard is empty", Toast.LENGTH_SHORT).show()
+            }
+        } else {
+            Toast.makeText(this, "Clipboard is empty", Toast.LENGTH_SHORT).show()
+        }
     }
 
-    private fun showQuickKeysSelector() {
-        val quickKeys = RevampedQuickKeys.getQuickKeys(this)
-        if (quickKeys.isEmpty()) {
-            RevampedQuickKeys.addQuickKey(this, "👋 Hello!")
-            RevampedQuickKeys.addQuickKey(this, "📍 Be right there")
-            RevampedQuickKeys.addQuickKey(this, "👍 Looks great!")
+    private fun triggerVoiceSpeech() {
+        try {
+            val intent = Intent(android.speech.RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+                putExtra(android.speech.RecognizerIntent.EXTRA_LANGUAGE_MODEL, android.speech.RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK
+            }
+            startActivity(intent)
+        } catch (_: Exception) {
+            Toast.makeText(this, "Voice dictation requires Google Speech Services", Toast.LENGTH_SHORT).show()
         }
-        val items = RevampedQuickKeys.getQuickKeys(this)
-        val candidateList = items.map { it.text }
-        updateCandidates(candidateList)
+    }
+
+    private fun hideSubPanels() {
+        if (emojiPanel != null) {
+            rootContainer.removeView(emojiPanel)
+            emojiPanel = null
+        }
+        if (aiToneStrip != null) {
+            rootContainer.removeView(aiToneStrip)
+            aiToneStrip = null
+        }
+        if (isResizerActive) {
+            RevampedKeyboardResizer.dismissResizer(rootContainer)
+            isResizerActive = false
+        }
     }
 
     private fun launchSettingsActivity() {
@@ -423,22 +556,10 @@ class RevampedKeyboardService : InputMethodService() {
         startActivity(intent)
     }
 
-    private fun hideSubPanels() {
-        if (aiToneStrip != null) {
-            rootContainer.removeView(aiToneStrip)
-            aiToneStrip = null
-        }
-        if (emojiPanel != null) {
-            rootContainer.removeView(emojiPanel)
-            emojiPanel = null
-            keyboardView.visibility = View.VISIBLE
-        }
-        if (isResizerActive) {
-            val overlay = rootContainer.findViewWithTag<View>("resizer_overlay")
-            if (overlay != null) {
-                rootContainer.removeView(overlay)
-            }
-            isResizerActive = false
-        }
+    private fun dp(v: Float): Int = (v * resources.displayMetrics.density).toInt()
+
+    override fun onDestroy() {
+        super.onDestroy()
+        audioHaptics.release()
     }
 }
