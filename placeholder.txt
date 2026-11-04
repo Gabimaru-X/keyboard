@@ -1,3 +1,3 @@
-Appversion: 1.0.3
-Versioncode: 4
+Appversion: 1.0.4
+Versioncode: 5
 Release: false
