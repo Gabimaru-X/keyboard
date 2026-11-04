@@ -1,0 +1,195 @@
+name: Build Revamped Keyboard APK
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+    inputs:
+      create_release:
+        description: 'Create GitHub Release with APK'
+        required: false
+        default: false
+        type: boolean
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build & Package APK
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Read & Bump Build Version
+        id: versioning
+        env:
+          INPUT_RELEASE: ${{ github.event.inputs.create_release }}
+        run: |
+          get() { grep -iE "^[[:space:]]*$1[[:space:]]*:" placeholder.txt | head -1 | cut -d: -f2- | tr -d '[:space:]'; }
+
+          OLD=$(get Versioncode)
+          if [[ ! "$OLD" =~ ^[0-9]+$ ]]; then
+            echo "::error file=placeholder.txt::Versioncode missing or not a number (got '$OLD')"
+            exit 1
+          fi
+          NEW=$((OLD + 1))
+
+          OLD_VER=$(get Appversion)
+          if [[ ! "$OLD_VER" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+            echo "::error file=placeholder.txt::Appversion must look like 1.0.0 (got '$OLD_VER')"
+            exit 1
+          fi
+          MAJ=$((10#${BASH_REMATCH[1]})); MIN=$((10#${BASH_REMATCH[2]})); PAT=$((10#${BASH_REMATCH[3]}))
+          PAT=$((PAT + 1))
+          if [ "$PAT" -gt 99 ]; then PAT=0; MIN=$((MIN + 1)); fi
+          if [ "$MIN" -ge 100 ]; then MAJ=$((MAJ + 1)); MIN=0; PAT=0; fi
+          NEW_VER="$MAJ.$MIN.$PAT"
+
+          sed -i -E "s/^([[:space:]]*Appversion[[:space:]]*:).*/\1 $NEW_VER/I" placeholder.txt
+          sed -i -E "s/^([[:space:]]*Versioncode[[:space:]]*:).*/\1 $NEW/I" placeholder.txt
+
+          VERSION=$(get Appversion)
+          CODE=$(get Versioncode)
+          if [[ ! "$VERSION" =~ ^[0-9A-Za-z._-]+$ ]]; then
+            echo "::error file=placeholder.txt::Appversion missing or invalid (got '$VERSION')"
+            exit 1
+          fi
+
+          RELEASE=$(get Release | tr 'A-Z' 'a-z')
+          case "$RELEASE" in
+            yes|y|true) RELEASE=true ;;
+            no|n|false|"") RELEASE=false ;;
+            *) echo "::error file=placeholder.txt::Release must be yes or no (got '$RELEASE')"; exit 1 ;;
+          esac
+          if [ "$INPUT_RELEASE" = "true" ]; then
+            RELEASE=true
+          fi
+
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "CODE=$CODE" >> "$GITHUB_ENV"
+          echo "RELEASE=$RELEASE" >> "$GITHUB_ENV"
+          echo "APK_NAME=Revamped-Keyboard-v$VERSION-c$CODE.apk" >> "$GITHUB_ENV"
+          echo "Build number: $OLD -> $NEW"
+          echo "Version: $VERSION (Code: $CODE, Release: $RELEASE)"
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: '9.6.0'
+          cache-disabled: false
+
+      - name: Decode Signing Keystore
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASS: ${{ secrets.KEYSTORE_PASS }}
+        run: |
+          if [ -n "$KEYSTORE_BASE64" ] && [ -n "$KEYSTORE_PASS" ]; then
+            KS="$RUNNER_TEMP/release.keystore"
+            echo "$KEYSTORE_BASE64" | base64 -d > "$KS"
+            chmod 600 "$KS"
+            ALIAS="revamped"
+            echo "KEYSTORE_FILE=$KS" >> "$GITHUB_ENV"
+            echo "KEYSTORE_ALIAS=$ALIAS" >> "$GITHUB_ENV"
+            echo "Release keystore configured for signing."
+          else
+            echo "No custom release keystore provided. Falling back to build configuration default."
+          fi
+
+      - name: Build APK with Gradle
+        env:
+          KEYSTORE_PASS: ${{ secrets.KEYSTORE_PASS }}
+          KEY_PASS: ${{ secrets.KEY_PASS }}
+        run: gradle assembleRelease --stacktrace --warning-mode all
+
+      - name: Prepare Distribution Artifacts
+        run: |
+          mkdir -p dist
+          OUTPUT_DIR=app/build/outputs/apk/release
+          APK_FILE=$(find $OUTPUT_DIR -name "*.apk" | head -1)
+          if [ -z "$APK_FILE" ]; then
+            echo "Error: APK not found in $OUTPUT_DIR"
+            exit 1
+          fi
+          cp "$APK_FILE" "dist/$APK_NAME"
+          (cd dist && sha256sum "$APK_NAME" > "$APK_NAME.sha256")
+          echo "Generated APK: $APK_NAME"
+          cat "dist/$APK_NAME.sha256"
+          {
+            echo "### Revamped Keyboard Build #$CODE · v$VERSION · Release: $RELEASE"
+            echo "| | |"
+            echo "|---|---|"
+            echo "| File | \`$APK_NAME\` |"
+            echo "| Size | $(du -h "dist/$APK_NAME" | cut -f1) |"
+            echo "| SHA-256 | \`$(cut -d' ' -f1 "dist/$APK_NAME.sha256")\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.APK_NAME }}
+          path: |
+            dist/${{ env.APK_NAME }}
+            dist/${{ env.APK_NAME }}.sha256
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Commit version back to repo
+        id: commit_version
+        if: github.ref_type == 'branch'
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          if git diff --quiet -- placeholder.txt; then
+            echo "placeholder.txt unchanged - nothing to commit"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add placeholder.txt
+          git commit -m "build(ci): bump version to v$VERSION (build $CODE) [skip ci]"
+
+          for attempt in 1 2 3 4 5; do
+            echo "Push attempt $attempt/5..."
+            if git push origin "HEAD:$REF_NAME"; then
+              echo "Successfully pushed version bump"
+              exit 0
+            fi
+            echo "Push failed (remote likely moved), rebasing on origin/$REF_NAME..."
+            sleep $((attempt * 2))
+            git fetch origin "$REF_NAME"
+            git rebase "origin/$REF_NAME" || {
+              echo "Rebase conflict; aborting rebase"
+              git rebase --abort || true
+              exit 1
+            }
+          done
+          echo "Failed to push version bump after 5 attempts"
+          exit 1
+
+      - name: Create GitHub Release
+        if: env.RELEASE == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "Revamped Keyboard v${{ env.VERSION }}"
+          tag_name: "v${{ env.VERSION }}"
+          files: |
+            dist/${{ env.APK_NAME }}
+            dist/${{ env.APK_NAME }}.sha256
+          draft: false
+          prerelease: false
+          generate_release_notes: true

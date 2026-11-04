@@ -1,0 +1,27 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Squircle Background -->
+    <path
+        android:fillColor="#12131A"
+        android:pathData="M 24,10 C 14,10 10,14 10,24 L 10,84 C 10,94 14,98 24,98 L 84,98 C 94,98 98,94 98,84 L 98,24 C 98,14 94,10 84,10 Z" />
+
+    <!-- Minimalist Keycap Contour -->
+    <path
+        android:fillColor="#1C1D26"
+        android:strokeColor="#2E3040"
+        android:strokeWidth="1.5"
+        android:pathData="M 28,22 C 22,22 20,24 20,30 L 20,78 C 20,84 22,86 28,86 L 80,86 C 86,86 88,84 88,78 L 88,30 C 88,24 86,22 80,22 Z" />
+
+    <!-- Modern Stylized 'R' Key Vector -->
+    <path
+        android:fillColor="#FF385C"
+        android:pathData="M 36,32 L 56,32 C 65,32 71,37 71,45 C 71,52 66,57 58,58 L 73,76 L 62,76 L 48,58 L 46,58 L 46,76 L 36,76 Z M 46,40 L 46,50 L 55,50 C 60,50 62,48 62,45 C 62,42 60,40 55,40 Z" />
+
+    <!-- Neural Glow Spark Dot -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M 72,28 A 3.5,3.5 0 1,1 72,35 A 3.5,3.5 0 1,1 72,28 Z" />
+</vector>
